@@ -5,7 +5,7 @@ target = "riscv64gc-unknown-none-elf"
 
 # QEMU 运行器配置
 # cargo run 时自动调用此命令执行编译产物
-# 等价于：qemu-system-riscv64 -machine virt -nographic -bios none -kernel <编译产物>
+# 使用串口输出七巧板图案（ANSI 彩色）
 [target.riscv64gc-unknown-none-elf]
 runner = [
     "qemu-system-riscv64",

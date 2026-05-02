@@ -28,6 +28,10 @@
 // 启用 nobios 特性后，tg_sbi 内建了 M-mode 启动代码，无需外部 SBI 固件
 use tg_sbi::{console_putchar, shutdown};
 
+// GPU 模块：用于显示七巧板图案
+#[cfg(target_arch = "riscv64")]
+mod gpu;
+
 /// S 态程序入口点。
 ///
 /// 这是一个裸函数（naked function），放置在 `.text.entry` 段，
@@ -58,15 +62,35 @@ unsafe extern "C" fn _start() -> ! {
     )
 }
 
-/// S 态主函数：打印 "Hello, world!" 并关机。
+/// S 态主函数：显示七巧板"OS"图案并关机。
 ///
-/// 通过 SBI 的 `console_putchar` 逐字节输出字符串，
+/// 通过 GPU framebuffer 显示七巧板图案，
 /// 然后调用 `shutdown` 正常关机退出 QEMU。
+#[cfg(target_arch = "riscv64")]
+extern "C" fn rust_main() -> ! {
+    // 输出提示信息
+    for c in b"Initializing Tangram OS display...\n" {
+        console_putchar(*c);
+    }
+
+    // 绘制七巧板"OS"图案
+    gpu::display_tangram();
+
+    // 输出完成信息
+    for c in b"Tangram OS pattern displayed!\n" {
+        console_putchar(*c);
+    }
+
+    shutdown(false) // false 表示正常关机
+}
+
+/// 非 RISC-V64 架构的占位主函数
+#[cfg(not(target_arch = "riscv64"))]
 extern "C" fn rust_main() -> ! {
     for c in b"Hello, world!\n" {
         console_putchar(*c);
     }
-    shutdown(false) // false 表示正常关机
+    shutdown(false)
 }
 
 /// panic 处理函数。
