@@ -54,6 +54,12 @@ core::arch::global_asm!(include_str!(env!("APP_ASM")));
 // 最大支持的应用程序数量
 const APP_CAPACITY: usize = 32;
 
+// 全局变量：TCB 数组（放在 .bss 段，避免栈溢出）
+static mut TCBS: [TaskControlBlock; APP_CAPACITY] = [TaskControlBlock::ZERO; APP_CAPACITY];
+
+// 全局变量：当前正在执行的 TCB 指针（用于 sys_trace 访问）
+static mut CURRENT_TCB: Option<*mut TaskControlBlock> = None;
+
 // 定义内核入口点：分配 (APP_CAPACITY + 2) * 8 KiB = 272 KiB 的内核栈
 // 比第二章更大，因为需要同时容纳多个任务的内核上下文。
 //
@@ -104,12 +110,12 @@ extern "C" fn rust_main() -> ! {
     tg_syscall::init_trace(&SyscallContext);
 
     // 第四步：初始化任务控制块数组，加载所有用户程序
-    let mut tcbs = [TaskControlBlock::ZERO; APP_CAPACITY];
+    // 使用全局 TCB 数组（在 .bss 段），避免栈溢出
     let mut index_mod = 0;
     for (i, app) in tg_linker::AppMeta::locate().iter().enumerate() {
         let entry = app.as_ptr() as usize;
         log::info!("load app{i} to {entry:#x}");
-        tcbs[i].init(entry);
+        unsafe { TCBS[i].init(entry) };
         index_mod += 1;
     }
     println!();
@@ -123,8 +129,11 @@ extern "C" fn rust_main() -> ! {
     let mut remain = index_mod; // 剩余未完成的任务数
     let mut i = 0usize; // 当前任务索引
     while remain > 0 {
-        let tcb = &mut tcbs[i];
+        let tcb = unsafe { &mut TCBS[i] };
         if !tcb.finish {
+            // 设置当前 TCB 指针（用于 sys_trace 访问）
+            unsafe { CURRENT_TCB = Some(tcb as *mut _) };
+
             loop {
                 // 【抢占式调度】设置时钟中断：12500 个时钟周期后触发
                 // 当 coop feature 启用时，跳过此步（协作式调度，不使用时钟中断）
@@ -211,6 +220,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// 各依赖库所需接口的具体实现
 mod impls {
     use tg_syscall::*;
+    use crate::CURRENT_TCB;
 
     /// 控制台实现：通过 SBI 逐字符输出
     pub struct Console;
@@ -296,22 +306,43 @@ mod impls {
 
     /// Trace 系统调用实现（练习题需要完成的部分）
     ///
-    /// 当前为占位实现，返回 -1 表示未实现。
-    /// 学生需要在练习中实现 trace 功能，支持：
-    /// - 读取用户内存（trace_request=0）
-    /// - 写入用户内存（trace_request=1）
-    /// - 查询系统调用计数（trace_request=2）
+    /// 支持三种操作：
+    /// - trace_request=0: 读取用户内存（id 为地址）
+    /// - trace_request=1: 写入用户内存（id 为地址，data 为要写入的值）
+    /// - trace_request=2: 查询系统调用计数（id 为系统调用编号）
     impl Trace for SyscallContext {
         #[inline]
         fn trace(
             &self,
             _caller: Caller,
-            _trace_request: usize,
-            _id: usize,
-            _data: usize,
+            trace_request: usize,
+            id: usize,
+            data: usize,
         ) -> isize {
-            tg_console::log::info!("trace: not implemented");
-            -1
+            unsafe {
+                // 获取当前 TCB 的引用
+                let tcb = match CURRENT_TCB {
+                    Some(ptr) => &*ptr,
+                    None => return -1,
+                };
+
+                match trace_request {
+                    // 读取用户内存：id 视为 *const u8，读取该地址处 1 字节
+                    0 => {
+                        let byte = *(id as *const u8);
+                        byte as isize
+                    }
+                    // 写入用户内存：id 视为 *mut u8，写入 data 的最低字节
+                    1 => {
+                        *(id as *mut u8) = data as u8;
+                        0
+                    }
+                    // 查询系统调用计数：id 为系统调用编号
+                    2 => tcb.get_syscall_count(id) as isize,
+                    // 无效的 trace_request
+                    _ => -1,
+                }
+            }
         }
     }
 }

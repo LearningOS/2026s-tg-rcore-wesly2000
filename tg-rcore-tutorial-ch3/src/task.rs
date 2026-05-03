@@ -24,6 +24,7 @@ use tg_syscall::{Caller, SyscallId};
 /// - `ctx`：用户态上下文（所有通用寄存器 + 控制寄存器），用于任务切换时保存/恢复状态
 /// - `finish`：任务是否已完成（退出或被杀死）
 /// - `stack`：用户栈空间（8 KiB），每个任务有独立的栈
+/// - `syscall_counts`：系统调用计数器数组，索引为系统调用 ID
 pub struct TaskControlBlock {
     /// 用户态上下文：保存 Trap 时的所有寄存器状态
     ctx: LocalContext,
@@ -32,6 +33,10 @@ pub struct TaskControlBlock {
     /// 用户栈：8 KiB（1024 个 usize = 1024 × 8 = 8192 字节）
     /// 每个任务拥有独立的栈空间，避免栈溢出影响其他任务
     stack: [usize; 1024],
+    /// 系统调用计数器：记录每个系统调用的调用次数
+    /// 数组索引为系统调用 ID，值为调用次数
+    /// 使用 usize 提供足够大的计数空间（最大 2^64-1）
+    syscall_counts: [usize; 512],
 }
 
 /// 调度事件
@@ -55,6 +60,7 @@ impl TaskControlBlock {
         ctx: LocalContext::empty(),
         finish: false,
         stack: [0; 1024],
+        syscall_counts: [0; 512],
     };
 
     /// 初始化一个任务
@@ -62,9 +68,11 @@ impl TaskControlBlock {
     /// - 清零用户栈
     /// - 创建用户态上下文，设置入口地址和 `sstatus.SPP = User`
     /// - 将栈指针设置为用户栈的栈顶（高地址端）
+    /// - 清零系统调用计数器
     pub fn init(&mut self, entry: usize) {
         self.stack.fill(0);
         self.finish = false;
+        self.syscall_counts.fill(0);
         self.ctx = LocalContext::user(entry);
         // 栈从高地址向低地址增长，所以 sp 指向栈顶（数组末尾之后的地址）
         *self.ctx.sp_mut() = self.stack.as_ptr() as usize + core::mem::size_of_val(&self.stack);
@@ -88,7 +96,14 @@ impl TaskControlBlock {
         use SchedulingEvent as Event;
 
         // a7 寄存器存放 syscall ID
-        let id = self.ctx.a(7).into();
+        let id: Id = self.ctx.a(7).into();
+
+        // 记录系统调用计数（在处理之前，这样 trace 调用本身也会被计入）
+        let id_num = id.0; // 访问 SyscallId 的内部 usize 值
+        if id_num < self.syscall_counts.len() {
+            self.syscall_counts[id_num] += 1;
+        }
+
         // a0-a5 寄存器存放系统调用参数
         let args = [
             self.ctx.a(0),
@@ -117,6 +132,17 @@ impl TaskControlBlock {
             },
             // 不支持的系统调用
             Ret::Unsupported(_) => Event::UnsupportedSyscall(id),
+        }
+    }
+
+    /// 获取指定系统调用的调用次数
+    ///
+    /// 用于 sys_trace 的 trace_request=2 功能
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        if syscall_id < self.syscall_counts.len() {
+            self.syscall_counts[syscall_id]
+        } else {
+            0
         }
     }
 }
